@@ -1,3 +1,4 @@
+import { INFINITE_MAX_STEPS } from '@page-agent/core'
 import {
 	Copy,
 	CornerUpLeft,
@@ -31,7 +32,7 @@ export function ConfigPanel({ config, onSave, onClose }: ConfigPanelProps) {
 	const [model, setModel] = useState(config?.model || DEMO_MODEL)
 	const [apiKey, setApiKey] = useState(config?.apiKey)
 	const [language, setLanguage] = useState<LanguagePreference>(config?.language)
-	const [maxSteps, setMaxSteps] = useState(config?.maxSteps)
+	const [maxSteps, setMaxSteps] = useState(config?.maxSteps ?? INFINITE_MAX_STEPS)
 	const [systemInstruction, setSystemInstruction] = useState(config?.systemInstruction ?? '')
 	const [experimentalLlmsTxt, setExperimentalLlmsTxt] = useState(
 		config?.experimentalLlmsTxt ?? false
@@ -56,7 +57,7 @@ export function ConfigPanel({ config, onSave, onClose }: ConfigPanelProps) {
 		setModel(config?.model || DEMO_MODEL)
 		setApiKey(config?.apiKey)
 		setLanguage(config?.language)
-		setMaxSteps(config?.maxSteps)
+		setMaxSteps(config?.maxSteps ?? INFINITE_MAX_STEPS)
 		setSystemInstruction(config?.systemInstruction ?? '')
 		setExperimentalLlmsTxt(config?.experimentalLlmsTxt ?? false)
 		setExperimentalIncludeAllTabs(config?.experimentalIncludeAllTabs ?? false)
@@ -103,7 +104,7 @@ export function ConfigPanel({ config, onSave, onClose }: ConfigPanelProps) {
 				baseURL,
 				model,
 				language,
-				maxSteps: maxSteps || undefined,
+				maxSteps: maxSteps ?? INFINITE_MAX_STEPS,
 				systemInstruction: systemInstruction || undefined,
 				experimentalLlmsTxt,
 				experimentalIncludeAllTabs,
@@ -287,11 +288,12 @@ export function ConfigPanel({ config, onSave, onClose }: ConfigPanelProps) {
 						<Input
 							id="max-steps"
 							type="number"
-							placeholder="40"
+							placeholder={`∞ (${INFINITE_MAX_STEPS})`}
 							min={1}
-							max={200}
-							value={maxSteps ?? ''}
-							onChange={(e) => setMaxSteps(e.target.value ? Number(e.target.value) : undefined)}
+							value={maxSteps ?? INFINITE_MAX_STEPS}
+							onChange={(e) =>
+								setMaxSteps(e.target.value ? Number(e.target.value) : INFINITE_MAX_STEPS)
+							}
 							className="text-xs h-8 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none [-moz-appearance:textfield]"
 						/>
 					</div>

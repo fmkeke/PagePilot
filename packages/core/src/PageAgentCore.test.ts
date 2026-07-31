@@ -2,7 +2,7 @@ import type { BrowserState, PageController } from '@page-agent/page-controller'
 import { describe, expect, it, vi } from 'vitest'
 import * as z from 'zod/v4'
 
-import { PageAgentCore, tool } from './PageAgentCore'
+import { MemoryConversationStore, PageAgentCore, tool } from './PageAgentCore'
 import type { ExecutionResult } from './types'
 
 type TestFetch = (...args: Parameters<typeof globalThis.fetch>) => Promise<Response>
@@ -149,6 +149,52 @@ describe.concurrent('PageAgentCore lifecycle', () => {
 
 			await agent.stop()
 			await result
+		})
+
+		it('carries prior conversation turns into the next send', async () => {
+			const fetchMock = createFetchMock()
+				.mockResolvedValueOnce(doneResponse('Found three phones'))
+				.mockResolvedValueOnce(doneResponse('Applied the price filter'))
+			const agent = createAgent(fetchMock)
+
+			await agent.send('Find phones')
+			await agent.send('Only show options below 3000')
+
+			expect(agent.conversation.turns).toHaveLength(2)
+			expect(agent.conversation.turns[0]).toMatchObject({
+				userMessage: 'Find phones',
+				assistantMessage: 'Found three phones',
+				status: 'completed',
+			})
+
+			const requestBody = fetchMock.mock.calls[1][1]!.body
+			if (typeof requestBody !== 'string') throw new Error('Expected a string request body')
+			const request = JSON.parse(requestBody) as {
+				messages: { role: string; content: string }[]
+			}
+			const userPrompt = request.messages.find((message) => message.role === 'user')!.content
+			expect(userPrompt).toContain('<conversation_context>')
+			expect(userPrompt).toContain('<user>Find phones</user>')
+			expect(userPrompt).toContain('<assistant>Found three phones</assistant>')
+			expect(userPrompt).toContain('<user_request>\nOnly show options below 3000')
+		})
+
+		it('restores the latest persisted conversation', async () => {
+			const store = new MemoryConversationStore()
+			const firstAgent = createAgent(
+				createFetchMock().mockResolvedValueOnce(doneResponse('remembered answer')),
+				{ conversationStore: store }
+			)
+			await firstAgent.send('remember this')
+
+			const secondAgent = createAgent(createFetchMock(), { conversationStore: store })
+			await secondAgent.ready
+
+			expect(secondAgent.conversation.id).toBe(firstAgent.conversation.id)
+			expect(secondAgent.conversation.turns[0]).toMatchObject({
+				userMessage: 'remember this',
+				assistantMessage: 'remembered answer',
+			})
 		})
 	})
 

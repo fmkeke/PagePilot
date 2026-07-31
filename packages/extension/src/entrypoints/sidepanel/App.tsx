@@ -29,7 +29,8 @@ export default function App() {
 	const historyRef = useRef<HTMLDivElement>(null)
 	const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-	const { status, history, activity, currentTask, config, execute, stop, configure } = useAgent()
+	const { status, history, activity, conversation, currentTask, config, send, stop, configure } =
+		useAgent()
 
 	// Persist session when task finishes
 	const prevStatusRef = useRef(status)
@@ -64,11 +65,11 @@ export default function App() {
 			setInputValue('')
 			setView({ name: 'chat' })
 
-			execute(normalizedTask).catch((error) => {
-				console.error('[SidePanel] Failed to execute task:', error)
+			send(normalizedTask).catch((error) => {
+				console.error('[SidePanel] Failed to send message:', error)
 			})
 		},
-		[execute, status]
+		[send, status]
 	)
 
 	const handleSubmit = useCallback(
@@ -129,7 +130,8 @@ export default function App() {
 	// --- Chat view ---
 
 	const isRunning = status === 'running'
-	const showEmptyState = !currentTask && history.length === 0 && !isRunning
+	const turns = conversation?.turns ?? []
+	const showEmptyState = turns.length === 0 && !isRunning
 
 	return (
 		<div className="relative flex flex-col h-screen bg-background">
@@ -167,23 +169,43 @@ export default function App() {
 
 			{/* Content */}
 			<main className="flex-1 overflow-hidden flex flex-col">
-				{/* Current task */}
-				{currentTask && (
-					<div className="border-b px-3 py-2 bg-muted/30">
-						<div className="text-[10px] text-muted-foreground uppercase tracking-wide">Task</div>
-						<div className="text-xs font-medium truncate" title={currentTask}>
-							{currentTask}
-						</div>
-					</div>
-				)}
-
-				{/* History */}
+				{/* Conversation */}
 				<div ref={historyRef} className="flex-1 overflow-y-auto p-3 space-y-2">
 					{showEmptyState && <EmptyState />}
 
-					{history.map((event, index) => (
-						<EventCard key={index} event={event} />
-					))}
+					{turns.map((turn, turnIndex) => {
+						const isLatest = turnIndex === turns.length - 1
+						const executionEvents = isLatest
+							? history.filter((event) => event.type !== 'step' || event.action.name !== 'done')
+							: []
+
+						return (
+							<div key={turn.id} className="space-y-2">
+								<div className="ml-8 rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground whitespace-pre-wrap">
+									{turn.userMessage}
+								</div>
+
+								{executionEvents.length > 0 && (
+									<details className="rounded-lg border bg-muted/20" open={isRunning}>
+										<summary className="cursor-pointer px-3 py-2 text-[11px] text-muted-foreground">
+											Execution details ({executionEvents.length})
+										</summary>
+										<div className="space-y-2 border-t p-2">
+											{executionEvents.map((event, index) => (
+												<EventCard key={index} event={event} />
+											))}
+										</div>
+									</details>
+								)}
+
+								{turn.assistantMessage && (
+									<div className="mr-8 rounded-lg border bg-muted/40 px-3 py-2 text-xs whitespace-pre-wrap">
+										{turn.assistantMessage}
+									</div>
+								)}
+							</div>
+						)
+					})}
 
 					{/* Activity indicator at bottom */}
 					{activity && <ActivityCard activity={activity} />}

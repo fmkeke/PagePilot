@@ -4,12 +4,16 @@
 import type {
 	AgentActivity,
 	AgentStatus,
+	ConversationSession,
 	ExecutionResult,
 	HistoricalEvent,
 	SupportedLanguage,
 } from '@page-agent/core'
+import { INFINITE_MAX_STEPS } from '@page-agent/core'
 import type { LLMConfig } from '@page-agent/llms'
 import { useCallback, useEffect, useRef, useState } from 'react'
+
+import { conversationStore } from '@/lib/db'
 
 import { MultiPageAgent } from './MultiPageAgent'
 import { DEMO_CONFIG, migrateLegacyEndpoint } from './constants'
@@ -33,9 +37,11 @@ export interface UseAgentResult {
 	status: AgentStatus
 	history: HistoricalEvent[]
 	activity: AgentActivity | null
+	conversation: ConversationSession | null
 	currentTask: string
 	config: ExtConfig | null
 	execute: (task: string) => Promise<ExecutionResult>
+	send: (message: string) => Promise<ExecutionResult>
 	stop: () => void
 	configure: (config: ExtConfig) => Promise<void>
 }
@@ -45,6 +51,7 @@ export function useAgent(): UseAgentResult {
 	const [status, setStatus] = useState<AgentStatus>('idle')
 	const [history, setHistory] = useState<HistoricalEvent[]>([])
 	const [activity, setActivity] = useState<AgentActivity | null>(null)
+	const [conversation, setConversation] = useState<ConversationSession | null>(null)
 	const [currentTask, setCurrentTask] = useState('')
 	const [config, setConfig] = useState<ExtConfig | null>(null)
 
@@ -53,6 +60,7 @@ export function useAgent(): UseAgentResult {
 			let llmConfig = (result.llmConfig as LLMConfig) ?? DEMO_CONFIG
 			const language = (result.language as SupportedLanguage) || undefined
 			const advancedConfig = (result.advancedConfig as AdvancedConfig) ?? {}
+			const maxSteps = advancedConfig.maxSteps ?? INFINITE_MAX_STEPS
 
 			// Auto-migrate legacy testing endpoints
 			const migrated = migrateLegacyEndpoint(llmConfig)
@@ -63,7 +71,7 @@ export function useAgent(): UseAgentResult {
 				chrome.storage.local.set({ llmConfig: DEMO_CONFIG })
 			}
 
-			setConfig({ ...llmConfig, ...advancedConfig, language })
+			setConfig({ ...llmConfig, ...advancedConfig, maxSteps, language })
 		})
 	}, [])
 
@@ -74,6 +82,7 @@ export function useAgent(): UseAgentResult {
 		const agent = new MultiPageAgent({
 			...agentConfig,
 			instructions: systemInstruction ? { system: systemInstruction } : undefined,
+			conversationStore,
 		})
 		agentRef.current = agent
 
@@ -94,14 +103,26 @@ export function useAgent(): UseAgentResult {
 			setActivity(newActivity)
 		}
 
+		const handleConversationChange = () => {
+			const nextConversation = structuredClone(agent.conversation)
+			setConversation(nextConversation)
+			setCurrentTask(nextConversation.turns.at(-1)?.userMessage ?? '')
+		}
+
 		agent.addEventListener('statuschange', handleStatusChange)
 		agent.addEventListener('historychange', handleHistoryChange)
 		agent.addEventListener('activity', handleActivity)
+		agent.addEventListener('conversationchange', handleConversationChange)
+		void agent.ready.then(() => {
+			handleConversationChange()
+			setHistory([...agent.history])
+		})
 
 		return () => {
 			agent.removeEventListener('statuschange', handleStatusChange)
 			agent.removeEventListener('historychange', handleHistoryChange)
 			agent.removeEventListener('activity', handleActivity)
+			agent.removeEventListener('conversationchange', handleConversationChange)
 			agent.dispose()
 		}
 	}, [config])
@@ -113,6 +134,14 @@ export function useAgent(): UseAgentResult {
 		setCurrentTask(task)
 		setHistory([])
 		return agent.execute(task)
+	}, [])
+
+	const send = useCallback(async (message: string) => {
+		const agent = agentRef.current
+		if (!agent) throw new Error('Agent not initialized')
+
+		setCurrentTask(message)
+		return agent.send(message)
 	}, [])
 
 	const stop = useCallback(() => {
@@ -136,7 +165,7 @@ export function useAgent(): UseAgentResult {
 				await chrome.storage.local.remove('language')
 			}
 			const advancedConfig: AdvancedConfig = {
-				maxSteps,
+				maxSteps: maxSteps ?? INFINITE_MAX_STEPS,
 				systemInstruction,
 				experimentalLlmsTxt,
 				experimentalIncludeAllTabs,
@@ -152,9 +181,11 @@ export function useAgent(): UseAgentResult {
 		status,
 		history,
 		activity,
+		conversation,
 		currentTask,
 		config,
 		execute,
+		send,
 		stop,
 		configure,
 	}

@@ -34,6 +34,20 @@ export interface PanelAgentAdapter extends EventTarget {
 	/** Result of the most recent run, or `null` before the first run completes */
 	readonly lastResult: { success: boolean } | null
 
+	/** Resolves after persisted conversation state has been restored. */
+	readonly ready: Promise<void>
+
+	/** Current multi-turn conversation. */
+	readonly conversation: {
+		id: string
+		turns: readonly {
+			id: string
+			userMessage: string
+			assistantMessage?: string
+			status: 'running' | 'completed' | 'error' | 'stopped'
+		}[]
+	}
+
 	/** History of agent events */
 	readonly history: readonly {
 		type: 'step' | 'observation' | 'user_takeover' | 'retry' | 'error'
@@ -72,6 +86,9 @@ export interface PanelAgentAdapter extends EventTarget {
 
 	/** Execute a task */
 	execute(task: string): Promise<unknown>
+
+	/** Send one message in the current multi-turn conversation */
+	send(message: string): Promise<unknown>
 
 	/** Stop the current task (agent remains reusable) */
 	stop(): Promise<void>
