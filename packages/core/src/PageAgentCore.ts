@@ -8,6 +8,16 @@ import type { BrowserState, PageController } from '@page-agent/page-controller'
 import chalk from 'chalk'
 import * as z from 'zod/v4'
 
+import { DEFAULT_MAX_STEPS } from './constants'
+import {
+	type ConversationSession,
+	type ConversationStore,
+	type ConversationTurn,
+	buildConversationContext,
+	cloneConversation,
+	compactConversation,
+	createConversation,
+} from './conversation'
 import SYSTEM_PROMPT from './prompts/system_prompt.md?raw'
 import { tools } from './tools'
 import type {
@@ -24,6 +34,8 @@ import type {
 import { assert, fetchLlmsTxt, normalizeResponse, suppress, uid, waitFor } from './utils'
 
 export { tool, type PageAgentTool, type ToolContext } from './tools'
+export { DEFAULT_MAX_STEPS, INFINITE_MAX_STEPS } from './constants'
+export * from './conversation'
 export type * from './types'
 
 export type PageAgentCoreConfig = AgentConfig & { pageController: PageController }
@@ -69,6 +81,8 @@ export class PageAgentCore extends EventTarget {
 	taskId = ''
 	/** History events */
 	history: HistoricalEvent[] = []
+	/** Resolves after the latest persisted conversation has been restored. */
+	readonly ready: Promise<void>
 	/** Whether this agent has been disposed */
 	disposed = false
 
@@ -82,6 +96,8 @@ export class PageAgentCore extends EventTarget {
 
 	#status: AgentStatus = 'idle'
 	#llm: LLM
+	#conversation = createConversation(uid())
+	#conversationStore?: ConversationStore
 	/**
 	 * Task cancellation primitive: its signal reaches the LLM fetch, tools
 	 * (via `ctx.signal`) and async callbacks. Aborted only by `stop`/`dispose`
@@ -97,8 +113,6 @@ export class PageAgentCore extends EventTarget {
 
 	/** internal states during a single task execution */
 	#states = {
-		/** Accumulated wait time in seconds */
-		totalWaitTime: 0,
 		/** For detecting navigation */
 		lastURL: '',
 		/** Browser state */
@@ -108,11 +122,13 @@ export class PageAgentCore extends EventTarget {
 	constructor(config: PageAgentCoreConfig) {
 		super()
 
-		this.config = { ...config, maxSteps: config.maxSteps ?? 40 }
+		this.config = { ...config, maxSteps: config.maxSteps ?? DEFAULT_MAX_STEPS }
 
 		this.#llm = new LLM(this.config)
 		this.tools = new Map(tools)
 		this.pageController = config.pageController
+		this.#conversationStore = config.conversationStore
+		this.ready = this.#restoreLatestConversation()
 
 		this.#llm.addEventListener('retry', (e) => {
 			const { attempt, maxAttempts, lastError } = (e as CustomEvent).detail
@@ -156,6 +172,11 @@ export class PageAgentCore extends EventTarget {
 		return this.#lastResult
 	}
 
+	/** Current multi-turn conversation. */
+	get conversation(): ConversationSession {
+		return this.#conversation
+	}
+
 	/** Emit statuschange event */
 	#emitStatusChange(): void {
 		this.dispatchEvent(new Event('statuschange'))
@@ -165,6 +186,11 @@ export class PageAgentCore extends EventTarget {
 	#emitHistoryChange(pushHistoricalEvent?: HistoricalEvent): void {
 		if (pushHistoricalEvent) this.history.push(pushHistoricalEvent)
 		this.dispatchEvent(new Event('historychange'))
+	}
+
+	/** Emit conversationchange event */
+	#emitConversationChange(): void {
+		this.dispatchEvent(new Event('conversationchange'))
 	}
 
 	/**
@@ -204,10 +230,107 @@ export class PageAgentCore extends EventTarget {
 	}
 
 	/**
+	 * Start a new empty conversation. The current conversation remains persisted
+	 * when a store is configured.
+	 */
+	async newConversation(): Promise<ConversationSession> {
+		await this.ready
+		if (this.#status === 'running') throw new Error('Cannot change conversation while running.')
+
+		this.#conversation = createConversation(uid())
+		this.task = ''
+		this.taskId = ''
+		this.history = []
+		this.#lastResult = null
+		await this.#persistConversation()
+		this.#emitConversationChange()
+		this.#emitHistoryChange()
+		return this.#conversation
+	}
+
+	/** Restore a conversation by id. */
+	async resumeConversation(id: string): Promise<ConversationSession> {
+		await this.ready
+		if (this.#status === 'running') throw new Error('Cannot change conversation while running.')
+		if (!this.#conversationStore) throw new Error('No conversationStore is configured.')
+
+		const conversation = await this.#conversationStore.get(id)
+		if (!conversation) throw new Error(`Conversation ${id} was not found.`)
+		this.#conversation = conversation
+		this.task = ''
+		this.taskId = ''
+		this.history = []
+		this.#lastResult = null
+		this.#emitConversationChange()
+		this.#emitHistoryChange()
+		return this.#conversation
+	}
+
+	/**
+	 * Send one message in the current multi-turn conversation.
+	 *
+	 * Each message creates an independent browser task. Previous user/assistant
+	 * turns are injected as compact context; previous DOM indexes and tool traces
+	 * are deliberately excluded.
+	 */
+	async send(message: string): Promise<ExecutionResult> {
+		await this.ready
+		if (this.disposed) throw new Error('PageAgent has been disposed. Create a new instance.')
+		if (this.#status === 'running') throw new Error('A task is already running.')
+		if (!message) throw new Error('Message is required')
+
+		const context = buildConversationContext(this.#conversation, {
+			recentTurnLimit: this.config.conversationRecentTurnLimit,
+			summaryMaxChars: this.config.conversationSummaryMaxChars,
+		})
+		const now = Date.now()
+		const turn: ConversationTurn = {
+			id: uid(),
+			userMessage: message,
+			status: 'running',
+			createdAt: now,
+			updatedAt: now,
+			run: {
+				id: uid(),
+				status: 'running',
+				history: [],
+			},
+		}
+		this.#conversation.turns.push(turn)
+		if (!this.#conversation.title) this.#conversation.title = message.slice(0, 80)
+		this.#conversation.updatedAt = now
+		await this.#persistConversation()
+		this.#emitConversationChange()
+
+		try {
+			const result = await this.#executeTask(message, context)
+			this.#finishConversationTurn(turn, result)
+			await this.#persistConversation()
+			this.#emitConversationChange()
+			return result
+		} catch (error) {
+			this.#finishConversationTurn(turn, {
+				success: false,
+				data: String(error),
+				history: this.history,
+			})
+			turn.status = 'error'
+			turn.run.status = 'error'
+			await this.#persistConversation()
+			this.#emitConversationChange()
+			throw error
+		}
+	}
+
+	/**
 	 * external errors (pre-checks/config/hooks) will threw;
 	 * agent errors will be caught and added to history, and return a failed result
 	 */
 	async execute(task: string): Promise<ExecutionResult> {
+		return this.#executeTask(task)
+	}
+
+	async #executeTask(task: string, conversationContext = ''): Promise<ExecutionResult> {
 		// pre-checks
 		if (this.disposed) throw new Error('PageAgent has been disposed. Create a new instance.')
 		if (this.#status === 'running') throw new Error('A task is already running.')
@@ -218,7 +341,7 @@ export class PageAgentCore extends EventTarget {
 
 		this.history = []
 		this.#observations = []
-		this.#states = { totalWaitTime: 0, lastURL: '', browserState: null }
+		this.#states = { lastURL: '', browserState: null }
 		this.#abortController = new AbortController()
 		const signal = this.#abortController.signal
 
@@ -266,13 +389,16 @@ export class PageAgentCore extends EventTarget {
 					console.log(chalk.blue.bold('👀 Observing...'))
 
 					this.#states.browserState = await this.pageController.getBrowserState()
-					await this.#handleObservations(step)
+					await this.#handleObservations()
 
 					// assemble prompts
 
 					const messages = [
 						{ role: 'system' as const, content: this.#getSystemPrompt() },
-						{ role: 'user' as const, content: await this.#assembleUserPrompt() },
+						{
+							role: 'user' as const,
+							content: await this.#assembleUserPrompt(conversationContext),
+						},
 					]
 
 					const macroTool = { AgentOutput: this.#packMacroTool() }
@@ -374,6 +500,59 @@ export class PageAgentCore extends EventTarget {
 		}
 	}
 
+	async #restoreLatestConversation(): Promise<void> {
+		if (!this.#conversationStore) return
+
+		try {
+			const conversation = await this.#conversationStore.getLatest()
+			if (!conversation) return
+
+			let changed = false
+			for (const turn of conversation.turns) {
+				if (turn.status !== 'running') continue
+				turn.status = 'stopped'
+				turn.updatedAt = Date.now()
+				turn.run.status = 'stopped'
+				turn.run.result = {
+					success: false,
+					data: 'Task interrupted before completion.',
+				}
+				changed = true
+			}
+
+			this.#conversation = conversation
+			if (changed) await this.#persistConversation()
+			this.#emitConversationChange()
+		} catch (error) {
+			console.error('[PageAgent] Failed to restore the latest conversation:', error)
+		}
+	}
+
+	#finishConversationTurn(turn: ConversationTurn, result: ExecutionResult): void {
+		const status =
+			this.#status === 'stopped' ? 'stopped' : this.#status === 'completed' ? 'completed' : 'error'
+		turn.status = status
+		turn.assistantMessage = result.data
+		turn.updatedAt = Date.now()
+		turn.run.status = status
+		turn.run.result = { success: result.success, data: result.data }
+		turn.run.history = sanitizeHistory(result.history)
+		this.#conversation.updatedAt = turn.updatedAt
+		compactConversation(this.#conversation, {
+			recentTurnLimit: this.config.conversationRecentTurnLimit,
+			summaryMaxChars: this.config.conversationSummaryMaxChars,
+		})
+	}
+
+	async #persistConversation(): Promise<void> {
+		if (!this.#conversationStore) return
+		try {
+			await this.#conversationStore.save(cloneConversation(this.#conversation)!)
+		} catch (error) {
+			console.error('[PageAgent] Failed to save conversation:', error)
+		}
+	}
+
 	/**
 	 * Merge all tools into a single MacroTool with the following input:
 	 * - thinking: string
@@ -453,13 +632,6 @@ export class PageAgentCore extends EventTarget {
 					duration,
 				})
 
-				// counting wait time
-				if (toolName === 'wait') {
-					this.#states.totalWaitTime += toolInput?.seconds || 0
-				} else {
-					this.#states.totalWaitTime = 0
-				}
-
 				// Return structured result
 				return {
 					input,
@@ -535,34 +707,13 @@ export class PageAgentCore extends EventTarget {
 	 * @todo loop detection
 	 * @todo console error
 	 */
-	async #handleObservations(step: number): Promise<void> {
-		// Accumulated wait time warning
-		if (this.#states.totalWaitTime >= 3) {
-			this.pushObservation(
-				`You have waited ${this.#states.totalWaitTime} seconds accumulatively. ` +
-					`DO NOT wait any longer unless you have a good reason.`
-			)
-		}
-
+	async #handleObservations(): Promise<void> {
 		// Detect URL change
 		const currentURL = this.#states.browserState?.url || ''
 		if (currentURL !== this.#states.lastURL) {
 			this.pushObservation(`Page navigated to → ${currentURL}`)
 			this.#states.lastURL = currentURL
 			await waitFor(0.5) // wait for page to stabilize
-		}
-
-		// Remaining steps warning
-		const remaining = this.config.maxSteps - step
-		if (remaining === 5) {
-			this.pushObservation(
-				`⚠️ Only ${remaining} steps remaining. ` +
-					`Consider wrapping up or calling done with partial results.`
-			)
-		} else if (remaining === 2) {
-			this.pushObservation(
-				`⚠️ Critical: Only ${remaining} steps left! You must finish the task or call done immediately.`
-			)
 		}
 
 		// Push observations to history and emit
@@ -576,10 +727,10 @@ export class PageAgentCore extends EventTarget {
 		}
 	}
 
-	async #assembleUserPrompt(): Promise<string> {
+	async #assembleUserPrompt(conversationContext = ''): Promise<string> {
 		const browserState = this.#states.browserState!
 
-		let prompt = ''
+		let prompt = conversationContext
 
 		// <instructions> (optional)
 
@@ -597,8 +748,7 @@ export class PageAgentCore extends EventTarget {
 		prompt += `${this.task}\n`
 		prompt += '</user_request>\n'
 		prompt += '<step_info>\n'
-		prompt += `Step ${stepCount + 1} of ${this.config.maxSteps} max possible steps\n`
-		prompt += `Current time: ${new Date().toLocaleString()}\n`
+		prompt += `Step ${stepCount + 1}\n`
 		prompt += '</step_info>\n'
 		prompt += '</agent_state>\n\n'
 
@@ -658,4 +808,18 @@ export class PageAgentCore extends EventTarget {
 
 		this.config.onDispose?.(this)
 	}
+}
+
+function sanitizeHistory(history: HistoricalEvent[]): HistoricalEvent[] {
+	return history.map((event) => {
+		if (event.type === 'step') {
+			const { rawRequest: _rawRequest, rawResponse: _rawResponse, ...safeEvent } = event
+			return safeEvent
+		}
+		if (event.type === 'error') {
+			const { rawResponse: _rawResponse, ...safeEvent } = event
+			return safeEvent
+		}
+		return { ...event }
+	})
 }

@@ -2,11 +2,14 @@
  * Copyright (C) 2025 Alibaba Group Holding Limited
  * All rights reserved.
  */
-import { type AgentConfig, PageAgentCore } from '@page-agent/core'
+import { type AgentConfig, MemoryConversationStore, PageAgentCore } from '@page-agent/core'
 import { PageController, type PageControllerConfig } from '@page-agent/page-controller'
 import { Panel, type PanelConfig } from '@page-agent/ui'
 
+import { BrowserConversationStore } from './BrowserConversationStore'
+
 export * from '@page-agent/core'
+export { BrowserConversationStore } from './BrowserConversationStore'
 
 export type PageAgentConfig = AgentConfig & PageControllerConfig & Omit<PanelConfig, 'language'>
 
@@ -19,7 +22,13 @@ export class PageAgent extends PageAgentCore {
 			enableMask: config.enableMask ?? true,
 		})
 
-		super({ ...config, pageController })
+		const conversationStore =
+			config.conversationStore ??
+			(typeof indexedDB === 'undefined'
+				? new MemoryConversationStore()
+				: new BrowserConversationStore())
+
+		super({ ...config, pageController, conversationStore })
 
 		this.panel = new Panel(this, {
 			language: config.language,

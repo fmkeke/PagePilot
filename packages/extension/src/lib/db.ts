@@ -1,8 +1,8 @@
-import type { HistoricalEvent } from '@page-agent/core'
+import type { ConversationSession, ConversationStore, HistoricalEvent } from '@page-agent/core'
 import { type DBSchema, type IDBPDatabase, openDB } from 'idb'
 
 const DB_NAME = 'page-agent-ext'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
 export interface SessionRecord {
 	id: string
@@ -18,6 +18,11 @@ interface PageAgentDB extends DBSchema {
 		value: SessionRecord
 		indexes: { 'by-created': number }
 	}
+	conversations: {
+		key: string
+		value: ConversationSession
+		indexes: { 'by-updated': number }
+	}
 }
 
 let dbPromise: Promise<IDBPDatabase<PageAgentDB>> | null = null
@@ -26,8 +31,14 @@ function getDB() {
 	if (!dbPromise) {
 		dbPromise = openDB<PageAgentDB>(DB_NAME, DB_VERSION, {
 			upgrade(db) {
-				const store = db.createObjectStore('sessions', { keyPath: 'id' })
-				store.createIndex('by-created', 'createdAt')
+				if (!db.objectStoreNames.contains('sessions')) {
+					const store = db.createObjectStore('sessions', { keyPath: 'id' })
+					store.createIndex('by-created', 'createdAt')
+				}
+				if (!db.objectStoreNames.contains('conversations')) {
+					const store = db.createObjectStore('conversations', { keyPath: 'id' })
+					store.createIndex('by-updated', 'updatedAt')
+				}
 			},
 		})
 	}
@@ -67,4 +78,28 @@ export async function deleteSession(id: string): Promise<void> {
 export async function clearSessions(): Promise<void> {
 	const db = await getDB()
 	await db.clear('sessions')
+}
+
+/** Persistent conversation backend used by the extension side panel. */
+export const conversationStore: ConversationStore = {
+	async get(id) {
+		const db = await getDB()
+		return db.get('conversations', id)
+	},
+	async getLatest() {
+		const db = await getDB()
+		const cursor = await db
+			.transaction('conversations')
+			.store.index('by-updated')
+			.openCursor(null, 'prev')
+		return cursor?.value
+	},
+	async save(conversation) {
+		const db = await getDB()
+		await db.put('conversations', conversation)
+	},
+	async delete(id) {
+		const db = await getDB()
+		await db.delete('conversations', id)
+	},
 }

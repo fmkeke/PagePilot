@@ -5,7 +5,22 @@
 import * as z from 'zod/v4'
 
 import type { PageAgentCore } from '../PageAgentCore'
+import { DEFAULT_POLL_INTERVAL_SECONDS, MAX_WAIT_SECONDS } from '../constants'
 import { waitFor } from '../utils'
+
+function parseJsResult(message: string): unknown {
+	const prefix = '✅ Executed JavaScript. Result: '
+	if (!message.startsWith(prefix)) return null
+	const raw = message.slice(prefix.length)
+	try {
+		return JSON.parse(raw)
+	} catch {
+		if (raw === 'true') return true
+		if (raw === 'false') return false
+		if (raw === 'undefined') return undefined
+		return raw
+	}
+}
 
 /**
  * Per-invocation context passed to every tool execution.
@@ -56,7 +71,7 @@ tools.set(
 	tool({
 		description: 'Wait for x seconds. Can be used to wait until the page or data is fully loaded.',
 		inputSchema: z.object({
-			seconds: z.number().min(1).max(10).default(1),
+			seconds: z.number().min(1).max(MAX_WAIT_SECONDS).default(1),
 		}),
 		execute: async function (this: PageAgentCore, input, { signal }) {
 			// try to subtract LLM calling time from the actual wait time

@@ -57,6 +57,6 @@ LLM_API_KEY="..."
 LLM_MODEL_NAME="<exact-openrouter-id>"
 ```
 
-2. Tell them to run the demo themselves: `npm run dev:demo` (serves on port 5174) and exercise the agent against a real page.
+2. Tell them to run the demo themselves: `npm run dev:demo` (serves on port 17421) and exercise the agent against a real page.
 
 The live test only proves a single forced tool call round-trips; it is not an agent-quality eval. The user's manual run is the real acceptance test.

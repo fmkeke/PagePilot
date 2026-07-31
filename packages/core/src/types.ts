@@ -2,6 +2,7 @@ import type { LLMConfig } from '@page-agent/llms'
 
 // @note circular dependency but okay
 import type { PageAgentCore } from './PageAgentCore'
+import type { ConversationStore } from './conversation'
 import type { PageAgentTool } from './tools'
 
 /** Supported UI languages */
@@ -11,8 +12,27 @@ export interface AgentConfig extends LLMConfig {
 	language?: SupportedLanguage
 
 	/**
+	 * Optional persistence backend for multi-turn conversations.
+	 * When provided, the latest conversation is restored automatically.
+	 */
+	conversationStore?: ConversationStore
+
+	/**
+	 * Number of recent completed turns included verbatim in LLM context.
+	 * Older turns are represented by a compact rolling summary.
+	 * @default 6
+	 */
+	conversationRecentTurnLimit?: number
+
+	/**
+	 * Maximum size of the rolling conversation summary.
+	 * @default 4000
+	 */
+	conversationSummaryMaxChars?: number
+
+	/**
 	 * Maximum number of steps the agent can take per task.
-	 * @default 40
+	 * @default 999999 (INFINITE_MAX_STEPS)
 	 */
 	maxSteps?: number
 

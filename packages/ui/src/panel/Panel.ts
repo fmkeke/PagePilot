@@ -21,7 +21,8 @@ export interface PanelConfig {
  * Agent control panel
  *
  * Architecture:
- * - History list: renders directly from agent.history (historical events)
+ * - Conversation turns: persistent user/assistant messages
+ * - History list: current task execution details
  * - Header bar: shows activity events (transient state) and agent status
  *
  * This separation ensures data consistency - history is the single source of truth
@@ -50,6 +51,7 @@ export class Panel {
 	// Event handlers (bound for removal)
 	#onStatusChange = () => this.#handleStatusChange()
 	#onHistoryChange = () => this.#handleHistoryChange()
+	#onConversationChange = () => this.#renderHistory()
 	#onActivity = (e: Event) => this.#handleActivity((e as CustomEvent<AgentActivity>).detail)
 	#onAgentDispose = () => this.dispose()
 
@@ -83,6 +85,7 @@ export class Panel {
 		// Listen to agent events
 		this.#agent.addEventListener('statuschange', this.#onStatusChange)
 		this.#agent.addEventListener('historychange', this.#onHistoryChange)
+		this.#agent.addEventListener('conversationchange', this.#onConversationChange)
 		this.#agent.addEventListener('activity', this.#onActivity)
 		this.#agent.addEventListener('dispose', this.#onAgentDispose)
 
@@ -90,6 +93,7 @@ export class Panel {
 		this.#startHeaderUpdateLoop()
 
 		this.#showInputArea()
+		void this.#agent.ready.then(() => this.#renderHistory())
 
 		this.hide() // Start hidden
 	}
@@ -263,6 +267,7 @@ export class Panel {
 		// Remove agent event listeners
 		this.#agent.removeEventListener('statuschange', this.#onStatusChange)
 		this.#agent.removeEventListener('historychange', this.#onHistoryChange)
+		this.#agent.removeEventListener('conversationchange', this.#onConversationChange)
 		this.#agent.removeEventListener('activity', this.#onActivity)
 		this.#agent.removeEventListener('dispose', this.#onAgentDispose)
 
@@ -321,8 +326,10 @@ export class Panel {
 			// Handle user input mode
 			this.#handleUserAnswer(input)
 		} else {
-			// Execute task via agent
-			this.#agent.execute(input)
+			// Send one turn in the persistent conversation.
+			void this.#agent.send(input).catch((error) => {
+				console.error('[PageAgent Panel] Failed to send message:', error)
+			})
 		}
 	}
 
@@ -596,17 +603,38 @@ export class Panel {
 	 */
 	#renderHistory(): void {
 		const items: string[] = []
+		const turns = this.#agent.conversation.turns
 
-		// 1. Task card (always first)
-		const task = this.#agent.task
-		if (task) {
-			items.push(this.#createTaskCard(task))
-		}
+		if (turns.length > 0) {
+			for (const [index, turn] of turns.entries()) {
+				items.push(this.#createTaskCard(turn.userMessage))
 
-		// 2. Render each history event
-		const history = this.#agent.history
-		for (const event of history) {
-			items.push(...this.#createHistoryCards(event))
+				// Only the latest run has live execution details. Persisted turns
+				// intentionally render as chat messages instead of large tool traces.
+				if (index === turns.length - 1) {
+					for (const event of this.#agent.history) {
+						if (event.type === 'step' && event.action?.name === 'done') continue
+						items.push(...this.#createHistoryCards(event))
+					}
+				}
+
+				if (turn.assistantMessage) {
+					items.push(
+						createCard({
+							icon: '🤖',
+							content: turn.assistantMessage,
+							type: 'output',
+						})
+					)
+				}
+			}
+		} else {
+			// Backward-compatible rendering for standalone execute(task).
+			const task = this.#agent.task
+			if (task) items.push(this.#createTaskCard(task))
+			for (const event of this.#agent.history) {
+				items.push(...this.#createHistoryCards(event))
+			}
 		}
 
 		this.#historySection.innerHTML = items.join('')
